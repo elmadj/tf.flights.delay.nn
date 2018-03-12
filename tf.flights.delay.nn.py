@@ -12,39 +12,51 @@ import pandas as pd
 import math
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-
+from multiprocessing import Pool
 import tensorflow as tf
 from tensorflow.python.ops import variables
 import logging
 
-# This script tries to train a neural net to classify the delayed/canceled/diverted status of a flight based 
-# on a set of input features which represent the characteristics of a flight as described in the US department of transportation flight database 
-# The script can run in two modes : A prepare mode which preprocesses the data and splits it into train, validation and test set.
-# A train mode which creates and trains a neural net model which can be monitored with tensorboard. 
+
+# This script tries to train a neural net to classify the delayed/canceled/diverted status of a flight based
+# on a set of input features which represent the characteristics of a flight as described in the US department of transportation flight database
+# The script can run in two modes : A prepare mode which pre-processes the data and splits it into train, validation and test set.
+# A train mode which creates and trains a neural net model which can be monitored with tensorboard.
+# It can be started for example with the command "python tf.flights.delay.nn.py --model_dir=Momentum_0.9_bs200_lr0.001 --learning_rate=0.001 --momentum=0.9 --batch_size=200"
 
 #constants
-root_dir = "C:\\Users\\aoudmadj\\Documents\\data science lab\\flight-delays.2"
+root_dir = "C:\\Users\\aoudmadj\\Documents\\data science lab\\flight-delays"
 raw_data_file = root_dir + "\\flights.csv"
 
 training_data_file = root_dir + "\\flightsTrain.csv"
 test_data_file = root_dir + "\\flightsTest.csv"
 validation_data_file = root_dir + "\\flightsValidation.csv"
 
-
-
+num_partitions = 400 #number of partitions to split dataframe
+num_cores = 4 #number of cores on your machine
 
 
 #utility function to add a label for DIVERTED and CANCELED flights
 def transform_row(x):
    if x['DIVERTED'] == 1:
       x['ARRIVAL_DELAY_LABEL'] = 5
-   if x['CANCELLED'] == 1:
+   elif x['CANCELLED'] == 1:
       x['ARRIVAL_DELAY_LABEL'] = 6
+   return x
+
+
+def parallelize_dataframe(df, func):
+    df_split = np.array_split(df, num_partitions)
+    pool = Pool(num_cores, maxtasksperchild=100)
+    df = pd.concat(pool.map(func, df_split))
+    pool.close()   
+    pool.join()    
+    return df
 
 # prepare and split the data files into train, validation and test sets.
 def prepare_data():
     flights = pd.read_csv(raw_data_file)
-#create a categorical output wi th 7 classes :
+#create a categorical output with 7 classes :
 # class 0 : Flight arrival is earlier than expected
 # class 2 : Flight arrival is 0 to 15 minutes late
 # class 3 : Flight arrival is 15 to 30 minutes late
@@ -52,27 +64,50 @@ def prepare_data():
 # class 5 : Flight is DIVERTED
 # class 6 : Flight is canceled
 
+  #  flights = flights.sample(frac=0.01, replace=True)
+    flights = flights.reset_index()
     bins = [-np.inf, 0, 15, 30, 60, np.inf]
     group_names = [0, 1, 2, 3, 4]
     # sort for performance
-    flights.sort_values('ARRIVAL_DELAY', axis=0, ascending=False)
-    flights['ARRIVAL_DELAY_LABEL'] = pd.cut(flights['ARRIVAL_DELAY'], bins, labels=group_names)
-    flights.apply(lambda x: transform_row(x), axis=1,raw=True)
+    flights.sort_values('ARRIVAL_DELAY', axis=0, ascending=True)
+    flights['ARRIVAL_DELAY_LABEL'] = pd.cut(flights['ARRIVAL_DELAY'], bins, labels=group_names).astype(int)
+    #pd.apply with a lambda is not very memory efficient. Let's do it manually instead
+    #flights= flights.apply(lambda x: transform_row(x), axis=1,raw=True) 
+    print('Fixing labels...')
+    for i, row in flights.iterrows():
+       if row['DIVERTED'] == 1:
+          flights.set_value(i,'ARRIVAL_DELAY_LABEL',5)
+       elif row['CANCELLED'] == 1:
+          flights.set_value(i,'ARRIVAL_DELAY_LABEL',6)
+    print('Done fixing labels')
+    
+    #save the labeled data for later
+    flights.fillna(value=0, inplace=True)
+    flights.to_csv(root_dir + "\\LabeledFlights.csv")
+
 
     grouped = flights.groupby('ARRIVAL_DELAY_LABEL')
+    print(grouped.groups)
 
-# We have a lot of data so we take the min number of samples for all classes to
-# avoid class imbalance
-    number_samples = grouped['ARRIVAL_DELAY'].count().min()
+    # We have a lot of data so we need to sample the data to get a balanced data set.
+    # One way to do this is to under sample the data by taking the number of examples 
+    # in the minority class. This doesn't work very well in this case because the number of examples in 
+    # the minority class is ~ 15000 when the number of input dimensions is ~ 11000. There are not enough samples
+    # to train our neural net.
+    # We will use oversampling instead. The idea is to use the number of examples in the majority class
+    # and take random samples from the other classes. 
+    # In order to save memory, we will divide that number by 2 (but this because of the lack of resources ...)
+    
+    number_samples = math.ceil(grouped.size().max()/2)
     print('number of samples=', number_samples)
 
-# create a balanced train, validation and test set.
+    # create a balanced train, validation and test set.
     sampled_indices_train = []
     sampled_indices_test = []
     sampled_indices_validation = []
 
     for i in range(0, 6):
-        print('Sampling class %d', i)
+        print('Sampling class', i)
         sampled_indices_group = np.array(np.random.choice(grouped.groups[i], number_samples))
         sampled_indices_train_group, sampled_indices_test_group = train_test_split(sampled_indices_group , test_size=0.20, random_state=42)
         sampled_indices_train_group, sampled_indices_validation_group = train_test_split(sampled_indices_train_group , test_size=0.20, random_state=42)
@@ -86,7 +121,7 @@ def prepare_data():
     validationSet = flights.iloc[sampled_indices_validation,:]
 
     #normalize time and distance columns in train, test and validation sets.
-    #Use the same scaler.
+    #Use the same scaler for train validation and test.
     print('Scaling...')
     #SCHEDULED_DEPARTURE
     scaler = StandardScaler()
@@ -147,7 +182,7 @@ def prepare_data():
 
 
 #column names
-_CSV_COLUMNS = ['INDEX', 'YEAR', 'MONTH', 'DAY', 'DAY_OF_WEEK', 'AIRLINE',
+_CSV_COLUMNS = ['index', 'INDEX', 'YEAR', 'MONTH', 'DAY', 'DAY_OF_WEEK', 'AIRLINE',
    'FLIGHT_NUMBER', 'TAIL_NUMBER', 'ORIGIN_AIRPORT', 'DESTINATION_AIRPORT',
    'SCHEDULED_DEPARTURE', 'DEPARTURE_TIME', 'DEPARTURE_DELAY', 'TAXI_OUT',
    'WHEELS_OFF', 'SCHEDULED_TIME', 'ELAPSED_TIME', 'AIR_TIME', 'DISTANCE',
@@ -158,6 +193,7 @@ _CSV_COLUMNS = ['INDEX', 'YEAR', 'MONTH', 'DAY', 'DAY_OF_WEEK', 'AIRLINE',
 
 
 _CSV_COLUMN_DEFAULTS = [[0],
+                        [0],
                         ['2015'],
                         ['1'],
                         ['1'],
@@ -219,14 +255,8 @@ parser.add_argument('--l2', type=float, default=0.0,
 
 parser.add_argument('--batch_size', type=int, default=300, help='Number of examples per batch.')
 
-parser.add_argument('--train_data', type=str, default=training_data_file,
-    help='Path to the training data.')
-
-parser.add_argument('--validation_data', type=str, default=validation_data_file ,
-    help='Path to the test data.')
-
 parser.add_argument('--prepare', type=bool, default=False,
-    help='Path to the test data.')
+    help='True to prepare the data set.')
 
 parser.add_argument('--restore', type=str, default='',
     help='Name of model to restore.')
@@ -295,10 +325,6 @@ def build_model_columns(flightsTrain):
     scheduled_arrival = tf.feature_column.numeric_column('SCHEDULED_ARRIVAL', dtype=tf.float32)
     distance = tf.feature_column.numeric_column('DISTANCE', dtype=tf.float32)
 
-    #cross_origin_airport_month_day =
-    #tf.feature_column.crossed_column(keys=[month, day, origin_airport],
-    #hash_bucket_size=120156)
-
     # Group columns into wide columns and deep columns.
     base_columns = [month,
             day,
@@ -320,17 +346,15 @@ def build_model_columns(flightsTrain):
 
     deep_columns = [# create embeddings for our input columns with many dimensions
             # take the fourth root of the input dimension as the embedding's
-            # output dimension.
+            # output dimension. For a simple linear regression we could do a PCA instead.
             tf.feature_column.embedding_column(month, math.ceil(12.0 ** (1 / float(4)))),
             tf.feature_column.embedding_column(day, math.ceil(31.0 ** (1 / float(4)))),
             tf.feature_column.embedding_column(day_of_week, math.ceil(7.0 ** (1 / float(4)))),
             tf.feature_column.embedding_column(airline, math.ceil(number_of_airlines ** (1 / float(4)))),
             tf.feature_column.embedding_column(flight_number , math.ceil(number_of_flights ** (1 / float(4)))),
-			tf.feature_column.embedding_column(tail_number, math.ceil(number_of_airplanes ** (1 / float(4)))),
+            tf.feature_column.embedding_column(tail_number, math.ceil(number_of_airplanes ** (1 / float(4)))),
             tf.feature_column.embedding_column(origin_airport, math.ceil(number_of_airports ** (1 / float(4)))),
             tf.feature_column.embedding_column(destination_airport, math.ceil(number_of_airports ** (1 / float(4)))),
-           # tf.feature_column.embedding_column(cross_origin_airport_month_day,
-           # math.ceil(120156**(1/float(4)))),
             scheduled_departure ,
             departure_time ,
             scheduled_time ,
@@ -342,8 +366,8 @@ def build_model_columns(flightsTrain):
     return wide_columns, deep_columns, number_columns_in_input_layer
 
 
-def build_estimator(model_dir, model_type, TrainSet):
-  #Build an estimator appropriate for the given model type.
+def build_estimator(model_dir, model_type, trainSet):
+  #Build an estimator 
   with tf.device('/CPU:0'):
       wide_columns, deep_columns, number_columns_in_input_layer = build_model_columns(trainSet)
       hidden_units = [math.ceil(number_columns_in_input_layer * 2 / 3), math.ceil(number_columns_in_input_layer / 3)]
@@ -372,8 +396,7 @@ def build_estimator(model_dir, model_type, TrainSet):
 
 def input_fn(data_file, num_epochs, shuffle, batch_size, train_dataset_size):
   with tf.device('/CPU:0'):
-      assert tf.gfile.Exists(data_file), ('%s not found. Please make sure you have either run data_download.py or '
-          'set both arguments --train_data and --validation_data.' % data_file)
+      assert tf.gfile.Exists(data_file), ('%s not found.' % data_file)
 
       def parse_csv(value):
         columns = tf.decode_csv(value, record_defaults=_CSV_COLUMN_DEFAULTS)
@@ -394,10 +417,15 @@ def input_fn(data_file, num_epochs, shuffle, batch_size, train_dataset_size):
 
 
 def main(unused_argv):
-    flightsTrain = pd.read_csv(train_data_file)
-    #shutil.rmtree(root_dir + "\\" + FLAGS.model_dir, ignore_errors=True)
+    # Read the train and validation datasets only to know their size and column structure.
+    flightsTrain = pd.read_csv(training_data_file)
+    flightsValid = pd.read_csv(validation_data_file)
+    flightsValidLength = flightsValid.shape[0]
+    flightsTrainLength = flightsTrain.shape[0]
+    del flightsValid
+
     model = build_estimator(root_dir + "\\" + FLAGS.model_dir, FLAGS.model_type, flightsTrain)
-    #read the train dataset only to know its size
+    del flightsTrain
     # Train and evaluate the model every `FLAGS.epochs_per_eval` epochs.
     with tf.device("/CPU:0"):
         with tf.Session() as sess:
@@ -408,20 +436,15 @@ def main(unused_argv):
                 print("restored model ", model_checkpoint_file_base)
             sess.run(tf.global_variables_initializer())
             for n in range(FLAGS.train_epochs // FLAGS.epochs_per_eval):
-                model.train(input_fn=lambda: input_fn(FLAGS.train_data, FLAGS.epochs_per_eval, True, FLAGS.batch_size, flightsTrain))
-
-                results_validation = model.evaluate(input_fn=lambda: input_fn(FLAGS.validation_data, 1, False, FLAGS.batch_size), name='validation')
-
+                model.train(input_fn=lambda: input_fn(FLAGS.train_data, FLAGS.epochs_per_eval, True, FLAGS.batch_size, flightsTrainLength))
+                results_validation = model.evaluate(input_fn=lambda: input_fn(FLAGS.validation_data, 1, False, FLAGS.batch_size, flightsValidLength), name='validation')
                 # Display evaluation metrics
                 print('validation Results at epoch', (n + 1) * FLAGS.epochs_per_eval)
-
                 for key in sorted(results_validation):
                   print('%s: %s' % (key, results_validation[key]))
 
-
 if __name__ == '__main__':
     FLAGS, unparsed = parser.parse_known_args()
-    print(FLAGS.batch_size)
     if FLAGS.prepare:
         prepare_data()
     else:
@@ -429,7 +452,3 @@ if __name__ == '__main__':
             tf.logging.set_verbosity(tf.logging.INFO)
             summary_writer = tf.summary.FileWriter(root_dir + "\\" + FLAGS.model_dir, graph=tf.get_default_graph())
             tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
-
-
-
-
