@@ -58,15 +58,15 @@ def parallelize_dataframe(df, func):
 # prepare and split the data files into train, validation and test sets.
 def prepare_data():
     flights = pd.read_csv(raw_data_file)
-#create a categorical output with 7 classes :
-# class 0 : Flight arrival is earlier than expected
-# class 2 : Flight arrival is 0 to 15 minutes late
-# class 3 : Flight arrival is 15 to 30 minutes late
-# class 4 : Flight arrival is 30 to 60 minutes late
-# class 5 : Flight is DIVERTED
-# class 6 : Flight is canceled
+    # Create a categorical output with 7 classes :
+    # class 0 : Flight arrival is earlier than expected
+    # class 2 : Flight arrival is 0 to 15 minutes late
+    # class 3 : Flight arrival is 15 to 30 minutes late
+    # class 4 : Flight arrival is 30 to 60 minutes late
+    # class 5 : Flight is DIVERTED
+    # class 6 : Flight is canceled
 
-  #  flights = flights.sample(frac=0.01, replace=True)
+    #  flights = flights.sample(frac=0.01, replace=True)
     flights = flights.reset_index()
     bins = [-np.inf, 0, 15, 30, 60, np.inf]
     group_names = [0, 1, 2, 3, 4]
